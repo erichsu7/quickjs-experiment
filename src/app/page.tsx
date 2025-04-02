@@ -1,136 +1,66 @@
 "use client";
 
 import styles from "./page.module.css";
-import { useState, useCallback, useEffect } from "react";
-import { getQuickJS } from "quickjs-emscripten"; 
+import { useState, useCallback, useEffect, useContext } from "react";
+import { evalAll } from "../../utils/evalUtils";
+import { EvalIframe } from "../../components/EvalIframe";
+import { IframeEvalContext } from "../../contexts/IframeEvalContext";
+import bigAppTemplate from '../../public/big_app_template.json'
 
-async function evalQuickJSTimes(code: string, iterations = 1) {
-  const QuickJS = await getQuickJS();
-  const vm = QuickJS.newContext();
-  let result: any;
-
-  const start = performance.now();
-  for (let i = 0; i < iterations; i++) {
-    result = vm.evalCode(code);
-
-    if (result.error) {
-      const error = vm.dump(result.error);
-      result.error.dispose();
-      throw new Error(vm.dump(error));
-    }
-  }
-  const elapsedTime = performance.now() - start;
-  const returnValue = vm.dump(result.value);
-  result.value.dispose();
-  vm.dispose();
-  return { result: returnValue, elapsedTime: elapsedTime.toString() };
+// sends a message to the iframe to trigger its eval
+function evalIframe(code: string, setIframeEvalStart: (startTime: number) => void, iterations = 1) {
+  setIframeEvalStart(performance.now())
+  const params = { code, iterations };
+  // uncomment this next line to test serialization of a large object in the iframe
+  // const params = { code, iterations, bigAppTemplate: JSON.stringify(bigAppTemplate) };
+  document
+    .getElementById("eval-iframe")!
+    .contentWindow.postMessage(`start evalIframe: ${JSON.stringify(params)}`);
 }
 
-function evalTimes(code: string, iterations = 1) {
-  let result: string | undefined;
-  for (let i = 0; i < iterations; i++) {
-    result = eval(code);
-  }
-  return result;
-}
-
-async function evalAll(code: string, iterations = 1) {
-    if (typeof code !== "string" || typeof iterations !== "number") {
-      throw new Error('Invalid input')
-    }
-
-    const startEvalResult = performance.now();
-    const evalResult = evalTimes(code, iterations);
-    const evalResultTime = (
-      performance.now() - startEvalResult
-    ).toString();
-
-    const startEvalQuickJSResult = performance.now();
-    const { result: evalQuickJSResult, elapsedTime } = await evalQuickJSTimes(
-      code,
-      iterations
-    );
-    const evalQuickJSResultTime = (
-      performance.now() - startEvalQuickJSResult
-    ).toString();
-
-    evalIframe(code, iterations)
-
-    return {
-      evalResult,
-      evalResultTime,
-      evalQuickJSResult,
-      evalQuickJSResultTime,
-      evalQuickJSResultTimeLoopOnly: elapsedTime,
-    };
-}
-
-function evalIframe(code: string, iterations = 1) {
-  const params = { code, iterations }
-  document.getElementById('eval-iframe')!.contentWindow.postMessage(`start evalIframe: ${JSON.stringify(params)}`)
-}
-
-function EvalIframe() {
-  return (
-    <iframe
-      id="eval-iframe"
-      style={{ display: "none" }}
-      srcDoc={`
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <script type="text/javascript">
-            function evalTimes(code, iterations = 1) {
-              let result;
-              for (let i = 0; i < iterations; i++) {
-                result = eval(code);
-              }
-              return result;
-            }
-
-            window.addEventListener("message", (event) => {
-              if (event.data.startsWith("start evalIframe:")) {
-                const params = JSON.parse(event.data.slice("start evalIframe: ".length));
-                const start = performance.now();
-                const result = evalTimes(params.code, params.iterations);
-                const elapsedTime = performance.now() - start;
-                event.source.postMessage(
-                  'finish evalIframe: ' + JSON.stringify({
-                    result,
-                    elapsedTime,
-                  })
-                );
-              }
-          });
-          </script>
-        </head>
-        </html>
-  `}
-    />
-  );
-}
-
-export default function Home() {
+function App() {
   const [code, setCode] = useState("Math.sqrt(100)");
   const [iterations, setIterations] = useState(1_000_000);
   const [result, setResult] = useState<any>();
-  const [iframeResult, setIframeResult] = useState<any>();
+
+  const {
+    result: iframeResult,
+    setResult: setIframeResult,
+    startTime: iframeStartTime,
+    setStartTime: setIframeStartTime,
+    elapsedTime: iframeElapsedTime,
+    setElapsedTime: setIframeElapsedTime,
+  } = useContext(IframeEvalContext)
+
 
   useEffect(() => {
-    window.addEventListener('message', event => {
-      if (typeof event.data === 'string' && event.data.startsWith('finish evalIframe:')) {
+    const handler = (event: MessageEvent<any>) => {
+      if (
+        typeof event.data === "string" &&
+        event.data.startsWith("finish evalIframe:")
+      ) {
         const result = JSON.parse(
           event.data.slice("finish evalIframe: ".length)
         );
-        setIframeResult(result)
+        setIframeResult(result.result);
+        setIframeElapsedTime(performance.now() - iframeStartTime!);
       }
-    })
-  }, [setIframeResult])
+    };
 
-  const evalCode = useCallback(async (code: string, iterations: number) => {
-      const result = await evalAll(code, iterations)
+    window.addEventListener("message", handler);
+    return () => {
+      window.removeEventListener("message", handler);
+    };
+  }, [setIframeResult, iframeStartTime, setIframeElapsedTime]);
+
+  const evalCode = useCallback(
+    async (code: string, iterations: number) => {
+      const result = await evalAll(code, iterations);
       setResult(result);
-  }, [setResult]);
+      evalIframe(code, setIframeStartTime, iterations);
+    },
+    [setResult, setIframeStartTime]
+  );
 
   return (
     <div className={styles.page}>
@@ -164,7 +94,7 @@ export default function Home() {
               onChange={(e) => setIterations(parseInt(e.target.value))}
             />
           </div>
-          <button type="submit" >Run code</button>
+          <button type="submit">Run code</button>
           {result && (
             <table>
               <thead>
@@ -190,9 +120,11 @@ export default function Home() {
                   <td>{result.evalResultTime}</td>
                 </tr>
                 <tr>
-                  <td>iframe <code>eval</code></td>
-                  <td>{iframeResult?.result}</td>
-                  <td>{iframeResult?.elapsedTime}</td>
+                  <td>
+                    iframe <code>eval</code>
+                  </td>
+                  <td>{iframeResult}</td>
+                  <td>{iframeElapsedTime}</td>
                 </tr>
               </tbody>
             </table>
@@ -200,5 +132,26 @@ export default function Home() {
         </form>
       </main>
     </div>
+  );
+}
+
+export default function AppContainer() {
+  const [result, setResult] = useState("");
+  const [startTime, setStartTime] = useState(0)
+  const [elapsedTime, setElapsedTime] = useState(0);
+
+  return (
+    <IframeEvalContext.Provider
+      value={{
+        result,
+        setResult,
+        startTime,
+        setStartTime,
+        elapsedTime,
+        setElapsedTime,
+      }}
+    >
+      <App />
+    </IframeEvalContext.Provider>
   );
 }
