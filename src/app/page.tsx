@@ -1,7 +1,7 @@
 "use client";
 
 import styles from "./page.module.css";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { getQuickJS } from "quickjs-emscripten"; 
 
 async function evalQuickJSTimes(code: string, iterations = 1) {
@@ -34,7 +34,7 @@ function evalTimes(code: string, iterations = 1) {
   return result;
 }
 
-async function evalBoth(code: string, iterations = 1) {
+async function evalAll(code: string, iterations = 1) {
     if (typeof code !== "string" || typeof iterations !== "number") {
       throw new Error('Invalid input')
     }
@@ -54,6 +54,8 @@ async function evalBoth(code: string, iterations = 1) {
       performance.now() - startEvalQuickJSResult
     ).toString();
 
+    evalIframe(code, iterations)
+
     return {
       evalResult,
       evalResultTime,
@@ -63,18 +65,76 @@ async function evalBoth(code: string, iterations = 1) {
     };
 }
 
+function evalIframe(code: string, iterations = 1) {
+  const params = { code, iterations }
+  document.getElementById('eval-iframe')!.contentWindow.postMessage(`start evalIframe: ${JSON.stringify(params)}`)
+}
+
+function EvalIframe() {
+  return (
+    <iframe
+      id="eval-iframe"
+      style={{ display: "none" }}
+      srcDoc={`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script type="text/javascript">
+            function evalTimes(code, iterations = 1) {
+              let result;
+              for (let i = 0; i < iterations; i++) {
+                result = eval(code);
+              }
+              return result;
+            }
+
+            window.addEventListener("message", (event) => {
+              if (event.data.startsWith("start evalIframe:")) {
+                const params = JSON.parse(event.data.slice("start evalIframe: ".length));
+                const start = performance.now();
+                const result = evalTimes(params.code, params.iterations);
+                const elapsedTime = performance.now() - start;
+                event.source.postMessage(
+                  'finish evalIframe: ' + JSON.stringify({
+                    result,
+                    elapsedTime,
+                  })
+                );
+              }
+          });
+          </script>
+        </head>
+        </html>
+  `}
+    />
+  );
+}
+
 export default function Home() {
   const [code, setCode] = useState("Math.sqrt(100)");
   const [iterations, setIterations] = useState(1_000_000);
   const [result, setResult] = useState<any>();
+  const [iframeResult, setIframeResult] = useState<any>();
+
+  useEffect(() => {
+    window.addEventListener('message', event => {
+      if (typeof event.data === 'string' && event.data.startsWith('finish evalIframe:')) {
+        const result = JSON.parse(
+          event.data.slice("finish evalIframe: ".length)
+        );
+        setIframeResult(result)
+      }
+    })
+  }, [setIframeResult])
 
   const evalCode = useCallback(async (code: string, iterations: number) => {
-      const result = await evalBoth(code, iterations)
+      const result = await evalAll(code, iterations)
       setResult(result);
   }, [setResult]);
 
   return (
     <div className={styles.page}>
+      <EvalIframe />
       <main className={styles.main}>
         <form
           onSubmit={async (e) => {
@@ -117,17 +177,22 @@ export default function Home() {
               <tbody>
                 <tr>
                   <td>
+                    QuickJS <code>evalCode</code>
+                  </td>
+                  <td>{result.evalQuickJSResult}</td>
+                  <td>{result.evalQuickJSResultTime}</td>
+                </tr>
+                <tr>
+                  <td>
                     Native <code>eval</code>
                   </td>
                   <td>{result.evalResult}</td>
                   <td>{result.evalResultTime}</td>
                 </tr>
                 <tr>
-                  <td>
-                    QuickJS <code>evalCode</code>
-                  </td>
-                  <td>{result.evalQuickJSResult}</td>
-                  <td>{result.evalQuickJSResultTime}</td>
+                  <td>iframe <code>eval</code></td>
+                  <td>{iframeResult?.result}</td>
+                  <td>{iframeResult?.elapsedTime}</td>
                 </tr>
               </tbody>
             </table>
